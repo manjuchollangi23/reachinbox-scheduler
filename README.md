@@ -1,87 +1,178 @@
 # ReachInbox Hiring Assignment - Full-stack Email Job Scheduler
 
-## Architecture Overview
+A production-grade, distributed email scheduler and dashboard built with **Express.js**, **TypeScript**, **PostgreSQL**, **BullMQ + Redis**, and **Next.js** following the ReachInbox Figma specification.
 
-This project is a robust, production-ready email scheduler.
+---
 
-- **Backend**: Express.js + TypeScript
-- **Database**: PostgreSQL (via Prisma ORM) for persistence across server restarts.
-- **Queue System**: BullMQ backed by Redis for reliable job scheduling. BullMQ strictly uses Redis to manage delayed jobs, avoiding OS-level cron.
-- **Search**: Elasticsearch for indexing and fast searching of scheduled and sent emails.
-- **Email Delivery**: Nodemailer configured with Ethereal Email (Mock SMTP).
-- **Frontend**: Next.js (App Router) + Tailwind CSS with Google OAuth via NextAuth.
+## 🏗 Architecture Overview
 
-### How Scheduling Works
-When a user schedules a campaign, the backend creates `EmailJob` records in PostgreSQL with `status: PENDING`. Simultaneously, it enqueues these jobs into BullMQ with a calculated delay (time until scheduled time + cumulative delay for individual emails). BullMQ stores this queue in Redis and natively handles delayed processing.
+```
+[ Next.js Frontend ] ──(HTTP)──> [ Express Backend API ]
+                                       │
+                         ┌─────────────┴─────────────┐
+                         ▼                           ▼
+                 [ PostgreSQL ]                [ Redis 5+ ]
+                 (Prisma ORM)                (BullMQ Queue)
+                 - User model                - email-queue
+                 - EmailJob table            - Delayed job sets
+                 - previewUrl storage        - Atomic rate counters
+                                                     │
+                                                     ▼
+                                            [ BullMQ Worker ]
+                                            - Concurrency: 5
+                                            - Delay between emails
+                                            - Hourly limit check
+                                            - Ethereal SMTP
+                                                     │
+                                                     ▼
+                                            [ Ethereal Sandbox ]
+                                            - Web preview URLs
+```
 
-### How Persistence is Handled
-Since BullMQ data is backed by Redis (and optionally configured with append-only files for durability), and jobs are stored in PostgreSQL, any server restart will not lose data. When the worker starts again, BullMQ automatically resumes processing the queue where it left off, and PostgreSQL ensures we have a permanent record of all job statuses.
+### 1. How Scheduling Works (No Cron)
+* When a user schedules a campaign, the `POST /api/jobs/schedule` endpoint receives the recipient list, subject, body, target time, inter-email delay (`delaySeconds`), and hourly rate limit (`hourlyLimit`).
+* The backend creates records in PostgreSQL (`EmailJob`) with status `PENDING`.
+* For each recipient, it calculates `delay = max(0, targetTime - Date.now()) + cumulativeDelay`.
+* It enqueues jobs into BullMQ with `{ delay, jobId }`. BullMQ stores delayed jobs natively inside Redis sorted sets without relying on OS-level crons or `node-cron`.
 
-### Rate Limiting & Concurrency
-- **Concurrency**: The BullMQ worker is instantiated with a `concurrency` setting (default: 5), allowing it to process multiple jobs in parallel.
-- **Rate Limiting (Per Sender)**: Enforced via Redis atomic counters keyed by `rate_limit:{senderId}:{hour_window}`. When a worker picks up a job, it increments the counter. If the count exceeds the `hourlyLimit` set for that campaign, the worker automatically delays the job to the next available hour window using BullMQ's `job.moveToDelayed()` and throws a `DelayedError()`. This prevents the job from failing while safely moving it to a future time, preserving order.
-- **Minimum Delay**: Implemented using a sleep block within the worker for the specified `delaySeconds`. Since the worker has high concurrency, it handles the delay without severely blocking the global queue processing rate.
-- **Slack Notification**: If a rate limit is hit, the worker checks if a notification has already been sent for the current hour window (via Redis). If not, it fires a webhook to the user's connected Slack account.
+### 2. How Persistence on Restart is Handled
+* **Dual-Layer Persistence**: 
+  1. **PostgreSQL** is the source of truth for all historical and state transitions (`PENDING`, `SENT`, `FAILED`).
+  2. **Redis** persists the BullMQ delayed and waiting queues.
+* When the backend server or worker crashes or restarts:
+  - No jobs are lost.
+  - BullMQ automatically re-subscribes to Redis upon initialization and resumes execution of all pending and delayed jobs from the exact timestamps they were scheduled for.
 
-## How to Run the Project
+### 3. How Rate Limiting & Concurrency are Implemented
+* **Concurrency**: The worker is configured with `concurrency: 5`, allowing parallel email processing across distinct queues.
+* **Per-Sender Hourly Rate Limiting**: Tracked atomically using Redis counters: `rate_limit:{senderId}:{hourWindow}`.
+  - On each job execution, the worker runs `INCR` on the sender's current hour counter.
+  - If `count > hourlyLimit`, the worker calculates the milliseconds until the start of the next hour and calls `job.moveToDelayed(nextHourTimestamp, job.token)` while throwing a `DelayedError()`.
+  - The job is safely postponed without being failed or dropped.
+* **Inter-Email Delay**: The worker enforces an explicit pause (`delaySeconds`) between successive email sends to simulate provider throttling.
+* **Slack Webhook Alerts**: When a sender hits their hourly limit, a deduplicated notification is dispatched to Slack.
+
+---
+
+## 🚀 How to Run the Project
 
 ### Prerequisites
-- Docker & Docker Compose
-- Node.js v18+
+* **Node.js** v18+ (recommended v20+)
+* **PostgreSQL** (running locally on port 5432 or via Docker)
+* **Redis** (running locally on port 6379 or via Docker)
 
-### 1. Start Infrastructure (PostgreSQL, Redis, Elasticsearch)
+---
+
+### Step 1: Start Infrastructure (PostgreSQL & Redis)
+Using Docker Compose:
 ```bash
 docker compose up -d
 ```
+*Or use locally installed PostgreSQL (`localhost:5432`, user: `reachinbox`, password: `password`, db: `reachinbox`) and Redis (`localhost:6379`).*
 
-### 2. Setup Backend
-1. Navigate to `backend` folder: `cd backend`
-2. Install dependencies: `npm install`
-3. Copy `.env.example` to `.env` (or use the created `.env`) and adjust configurations.
-4. Run DB migrations: `npx prisma migrate dev --name init`
-5. Generate Prisma Client: `npx prisma generate`
-6. Start backend: `npm run dev` (Ensure `ts-node-dev` or `nodemon` is setup, or just run `npx ts-node src/index.ts`)
+---
 
-### 3. Setup Frontend
-1. Navigate to `frontend` folder: `cd frontend`
-2. Install dependencies: `npm install`
-3. Create a `.env.local` file:
-   ```env
-   NEXTAUTH_URL=http://localhost:3000
-   NEXTAUTH_SECRET=super-secret-key
-   NEXT_PUBLIC_API_URL=http://localhost:3001
-   GOOGLE_CLIENT_ID=your_google_client_id
-   GOOGLE_CLIENT_SECRET=your_google_client_secret
+### Step 2: Run the Backend
+1. Navigate to the backend directory:
+   ```bash
+   cd backend
    ```
-4. Start frontend: `npm run dev`
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+3. Verify environment variables in `backend/.env`:
+   ```env
+   DATABASE_URL="postgresql://reachinbox:password@localhost:5432/reachinbox?schema=public"
+   REDIS_HOST="localhost"
+   REDIS_PORT=6379
+   PORT=3001
+   FRONTEND_URL="http://localhost:3000"
+   SMTP_HOST="smtp.ethereal.email"
+   SMTP_PORT=587
+   SMTP_USER="ethereal.user"
+   SMTP_PASS="ethereal.pass"
+   ```
+4. Push database schema and generate Prisma client:
+   ```bash
+   npx prisma db push
+   npx prisma generate
+   ```
+5. Start development server:
+   ```bash
+   npm run dev
+   ```
+   *The backend starts at `http://localhost:3001`. BullMQ visual admin dashboard is live at `http://localhost:3001/admin/queues`.*
 
-### 4. Ethereal Email Setup
-The backend automatically creates a dynamic Ethereal Email test account upon the first email sent if you don't provide explicit `SMTP_USER` and `SMTP_PASS` in the backend `.env`. Look at the backend console logs to see the generated credentials and a link to view the mocked inbox.
+---
 
-## Features Implemented
+### Step 3: Run the Frontend
+1. Navigate to the frontend directory:
+   ```bash
+   cd frontend
+   ```
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+3. Verify environment variables in `frontend/.env.local`:
+   ```env
+   NEXTAUTH_URL="http://localhost:3000"
+   NEXTAUTH_SECRET="Y0+/d+SX/p7Smi21pMbAzFsgUnMk/OcubdxujwnDxK0="
+   NEXT_PUBLIC_API_URL="http://localhost:3001"
+   GOOGLE_CLIENT_ID="your_google_client_id"
+   GOOGLE_CLIENT_SECRET="your_google_client_secret"
+   ```
+4. Start the frontend:
+   ```bash
+   npm run dev
+   ```
+   *The application will be live at `http://localhost:3000`.*
+
+---
+
+## 📧 Ethereal Email Setup & Preview Links
+
+* **Mock SMTP**: The backend uses Nodemailer with **Ethereal Email** (`smtp.ethereal.email`).
+* **Zero Configuration Needed**: When `SMTP_USER="ethereal.user"`, the backend automatically generates a dynamic Ethereal test inbox via `nodemailer.createTestAccount()`.
+* **Visual Verification in Dashboard**: Every sent email stores its Ethereal message URL in PostgreSQL. In the **"Sent"** dashboard tab and inside the email detail view, clicking **`📨 View Email ↗`** opens the full rendered message in your browser.
+
+---
+
+## 🎯 Features Implemented
+
 ### Backend
-✅ API to schedule emails
-✅ Persistent PostgreSQL Database via Prisma
-✅ BullMQ Delayed Jobs (No Cron)
-✅ Ethereal Email Integration
-✅ Elasticsearch Indexing for searchability
-✅ Live BullMQ Dashboard (`http://localhost:3001/admin/queues`)
-✅ Restart-safe persistence
-✅ Worker Concurrency Configuration
-✅ Configurable minimum delay between individual emails
-✅ Configurable rate limits per hour per sender (using Redis atomic counters)
-✅ Job delaying/rescheduling into next hour upon limit hit
-✅ Slack Webhook Notification when limit is hit
+- ✅ **API Scheduler**: `POST /api/jobs/schedule` with full validation, recipient arrays, and lead auto-provisioning.
+- ✅ **No-Cron BullMQ Scheduling**: Pure Redis-backed delayed job queues.
+- ✅ **Server Restart Resilience**: State backed by PostgreSQL and Redis.
+- ✅ **Per-Sender Rate Limiting**: Hourly quotas tracked via Redis atomic counters with `job.moveToDelayed()` rescheduling.
+- ✅ **Inter-Email Delay Throttling**: Configurable delay in seconds between individual dispatches.
+- ✅ **Slack Alerts**: Fires webhook notifications when an hourly quota is breached.
+- ✅ **Ethereal Delivery & Previews**: Saves and returns Ethereal web preview URLs.
+- ✅ **Admin Queue Dashboard**: Interactive UI at `/admin/queues` showing active, delayed, completed, and failed jobs.
 
-### Frontend
-✅ Google OAuth Login (NextAuth)
-✅ Dashboard with 'Scheduled' and 'Sent' tabs
-✅ Compose Email Modal
-✅ CSV Lead Upload & Parsing
-✅ Scheduling configurations (Start Time, Delay, Hourly Limit)
-✅ Premium, dynamic UI matching best practices with modern dark-mode aesthetics.
+### Frontend (Faithful to Figma Design)
+- ✅ **Figma Design Alignment**: Clean light theme (`#F8F9FA` background, emerald green `#00AC4F` accents, Inter typography).
+- ✅ **Flexible Authentication**:
+  - Google OAuth (via NextAuth).
+  - Direct credentials sign-in allowing any new user to sign in with their own email.
+- ✅ **Sidebar Navigation**: User profile card, ONG brand mark, "Compose" action, and CORE section with **Scheduled**, **Sent**, and **Failed** count badges.
+- ✅ **Inbox Row List**: Superhuman/Gmail-style rows with recipient, status badges (scheduled countdown vs sent), subject, and snippet preview.
+- ✅ **Click-to-Inspect Detail View**: Slide-out modal showing headers, body, timestamp, and a direct link to the Ethereal sandbox.
+- ✅ **Compose Modal**:
+  - Interactive recipient pills with delete tags (`email@domain.com ✕`).
+  - **Upload List**: Parses lead lists from `.csv` and `.txt` files.
+  - **+ Sample Leads**: One-click demo lead generator.
+  - Inline **Delay between 2 emails** and **Hourly Limit** inputs.
+  - Simulated **Rich Text Editor Toolbar** (Undo, Redo, Typography, Formatting, Lists, Links).
+  - **Send Later Popover**: Custom datetime picker + quick presets (*Tomorrow 10:00 AM, 11:00 AM, 3:00 PM*).
+- ✅ **Instant Search**: Real-time search by recipient, subject, or message body.
+- ✅ **Silent Background Polling**: Updates status every 4 seconds without table flickers.
 
-## Trade-offs & Assumptions
-- **Slack OAuth**: A full Slack OAuth requires a registered Slack App with valid redirect URIs. For this assignment, we simulated the connection by accepting a Webhook URL that the user provides, which allows for live verifiable testing immediately without configuring a Slack App.
-- **Search**: For simplicity, a basic wildcard search is implemented with Elasticsearch.
-- **NextAuth ID**: The frontend uses the user's email as the unique identifier (`senderId`) to communicate with the backend, simplifying state management.
+---
+
+## ⚖️ Assumptions, Shortcuts & Trade-offs
+
+1. **Ethereal vs Real SMTP**: Ethereal Mock SMTP was chosen strictly as requested by the assignment to enable safe testing and evaluation without requiring live Gmail/SES credentials. Real SMTP can be activated at any time by simply replacing the SMTP variables in `backend/.env`.
+2. **Slack Integration**: Configured to trigger via an incoming Slack Webhook URL to allow instant evaluation without requiring the reviewer to register a Slack OAuth workspace.
+3. **Elasticsearch Fallback**: Full search is gracefully backed by database filtering when an external Elasticsearch node is not present, guaranteeing 100% functionality without requiring an ES container.
