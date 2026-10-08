@@ -1,4 +1,5 @@
-import { Worker, Job } from 'bullmq';
+import { Worker, Job, DelayedError } from 'bullmq';
+import nodemailer from 'nodemailer';
 import IORedis from 'ioredis';
 import prisma from '../db/prisma';
 import { getTransporter } from '../email/transporter';
@@ -62,7 +63,7 @@ export const emailWorker = new Worker('email-queue', async (job: Job) => {
     
     // Move to delayed and throw error so it doesn't complete
     await job.moveToDelayed(Date.now() + delayUntilNextHour, job.token!);
-    throw new Worker.DelayedError(); // Specific error for BullMQ to know we moved it
+    throw new DelayedError(); // Specific error for BullMQ to know we moved it
   }
 
   // If we passed the rate limit check, we send the email.
@@ -77,11 +78,19 @@ export const emailWorker = new Worker('email-queue', async (job: Job) => {
     });
     
     console.log(`Email sent: ${info.messageId}`);
+    const previewUrl = nodemailer.getTestMessageUrl(info);
+    if (previewUrl) {
+      console.log(`📨 View sent email preview: ${previewUrl}`);
+    }
     
     // Update DB
     const updatedJob = await prisma.emailJob.update({
       where: { id: jobId },
-      data: { status: 'SENT', sentAt: new Date() }
+      data: {
+        status: 'SENT',
+        sentAt: new Date(),
+        previewUrl: (previewUrl as string) || null,
+      }
     });
     
     // Index in Elasticsearch

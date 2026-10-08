@@ -13,6 +13,21 @@ router.post('/schedule', async (req: Request, res: Response): Promise<any> => {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
+    let user = await prisma.user.findUnique({ where: { id: senderId } });
+    if (!user) {
+      user = await prisma.user.findUnique({ where: { email: senderId } });
+    }
+    if (!user) {
+      if (typeof senderId === 'string' && senderId.includes('@')) {
+        user = await prisma.user.create({
+          data: { email: senderId, name: senderId.split('@')[0] }
+        });
+      } else {
+        return res.status(404).json({ error: 'User not found. Please sign in again.' });
+      }
+    }
+    const resolvedSenderId = user.id;
+
     const scheduledDate = new Date(scheduledTime || Date.now());
     
     const createdJobs = [];
@@ -29,7 +44,7 @@ router.post('/schedule', async (req: Request, res: Response): Promise<any> => {
           scheduledTime: scheduledDate,
           delaySeconds: delaySeconds || 0,
           hourlyLimit: hourlyLimit || 200,
-          senderId,
+          senderId: resolvedSenderId,
           status: 'PENDING'
         }
       });
@@ -37,8 +52,6 @@ router.post('/schedule', async (req: Request, res: Response): Promise<any> => {
 
       // Calculate initial delay for queue
       const timeUntilSchedule = Math.max(0, scheduledDate.getTime() - Date.now());
-      // Add cumulative delay to ensure spacing between emails being queued
-      // E.g., if delay is 2s, email 0 sends at T, email 1 sends at T+2s.
       const delay = timeUntilSchedule + cumulativeDelay;
       cumulativeDelay += (delaySeconds || 0) * 1000;
 
@@ -46,8 +59,8 @@ router.post('/schedule', async (req: Request, res: Response): Promise<any> => {
         jobId: dbJob.id,
         delaySeconds: delaySeconds || 0
       }, {
-        delay, // BullMQ delay option
-        jobId: dbJob.id // Unique ID to maintain idempotency
+        delay,
+        jobId: dbJob.id
       });
     }
 
@@ -66,7 +79,20 @@ router.get('/', async (req: Request, res: Response): Promise<any> => {
        return res.status(400).json({ error: 'Missing senderId' });
     }
 
-    const filter: any = { senderId: String(senderId) };
+    // senderId can be a DB user ID (UUID) or an email — support both
+    const senderIdStr = String(senderId);
+    
+    // First try to find user by ID, then by email
+    let user = await prisma.user.findUnique({ where: { id: senderIdStr } });
+    if (!user) {
+      user = await prisma.user.findUnique({ where: { email: senderIdStr } });
+    }
+    
+    if (!user) {
+      return res.json([]); // No user found, return empty
+    }
+
+    const filter: any = { senderId: user.id };
     if (status) {
        filter.status = String(status);
     }
@@ -83,3 +109,4 @@ router.get('/', async (req: Request, res: Response): Promise<any> => {
 });
 
 export default router;
+

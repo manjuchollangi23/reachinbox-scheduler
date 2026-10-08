@@ -15,6 +15,9 @@ export const getTransporter = async () => {
         user: process.env.SMTP_USER,
         pass: process.env.SMTP_PASS,
       },
+      tls: {
+        rejectUnauthorized: false
+      }
     });
   } else {
     // Create a test account dynamically if not configured
@@ -28,6 +31,9 @@ export const getTransporter = async () => {
         user: testAccount.user,
         pass: testAccount.pass,
       },
+      tls: {
+        rejectUnauthorized: false
+      }
     });
   }
 

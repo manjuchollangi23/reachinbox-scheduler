@@ -39,4 +39,5 @@ model EmailJob {
   updatedAt      DateTime  @updatedAt
   sentAt         DateTime?
   error          String?
+  previewUrl     String?
 }
