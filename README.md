@@ -4,6 +4,21 @@ A production-grade, distributed email scheduler and dashboard built with **Expre
 
 ---
 
+## 🔗 Quick Links & URLs (Running the Project)
+
+| Service | Local URL | Description |
+|---|---|---|
+| **Frontend Dashboard** | `http://localhost:3000/dashboard` | Main email campaign scheduler & inbox dashboard |
+| **Login Page** | `http://localhost:3000/auth/signin` | Figma-styled login page |
+| **BullMQ Live Queue Monitor** | `http://localhost:3001/admin/queues` | Interactive visual dashboard for active, delayed & completed jobs |
+| **Backend API Health Check** | `http://localhost:3001/` | Backend Express API status and endpoints |
+
+> **🔑 Test Login Credentials:**  
+> • **Email**: `demo@example.com` *(or any custom email address)*  
+> • **Password**: `demo` *(or any password)*
+
+---
+
 ## 🏗 Architecture Overview
 
 ```
