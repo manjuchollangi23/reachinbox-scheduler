@@ -29,6 +29,23 @@ createBullBoard({
 
 app.use('/admin/queues', serverAdapter.getRouter());
 
+app.get('/', (req, res) => {
+  res.json({
+    status: 'online',
+    service: 'ReachInbox Email Scheduler API',
+    endpoints: {
+      adminQueues: '/admin/queues',
+      jobs: '/api/jobs',
+      search: '/api/search',
+    },
+    message: 'Backend API is running smoothly. Visit /admin/queues for the BullMQ dashboard.'
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() });
+});
+
 app.use('/api/jobs', jobsRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/search', searchRouter);
