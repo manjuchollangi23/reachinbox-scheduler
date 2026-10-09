@@ -4,6 +4,7 @@ import { useSession, signOut } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, useCallback } from "react";
 import axios from 'axios';
+import { toast } from 'sonner';
 import { ComposeModal } from "@/components/ComposeModal";
 import { EmailTable } from "@/components/EmailTable";
 
@@ -235,8 +236,8 @@ export default function Dashboard() {
         {/* Sidebar Footer */}
         <div className="pt-4 border-t border-gray-100 space-y-2 mt-auto">
           <button
-            onClick={() => alert('Connect Slack Webhook in your environment or server configuration to receive instant rate-limit breach alerts.')}
-            className="w-full flex items-center gap-2 px-3 py-2 text-xs text-gray-500 hover:text-gray-800 hover:bg-gray-50 rounded-lg transition-colors"
+            onClick={() => toast.info('Slack Rate-Limit Alerts: Configured in backend to notify when hourly sending limits are reached.')}
+            className="w-full flex items-center gap-2 px-3 py-2 text-xs text-gray-500 hover:text-gray-800 hover:bg-gray-50 rounded-lg transition-colors cursor-pointer"
           >
             <span>🔔</span>
             <span>Slack Alerts Active</span>
